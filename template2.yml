@@ -1,0 +1,223 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  KeyName:
+    Description: "KeyName that enables an SSH connection into the EC2 instances"
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: kk-1
+    ConstraintDescription: Provide exisiting KeyPair
+
+  Vpc1CidrBlock:
+    Description: CIDR Block for VPC1
+    Type: String
+    Default: 10.0.0.0/16
+
+  Vpc1Subnets:
+    Description: Subnets for VPC1
+    Type: CommaDelimitedList
+    Default: "10.0.0.0/24, 10.0.1.0/24, 10.0.2.0/24"
+
+  MyAz:
+    Description: AvailabilityZones
+    Type: String
+    Default: us-east-1a
+
+  MyImageId:
+    Description: Amazon Linux AMI 2018.03.0 (HVM), SSD Volume Type
+    Type: String
+    Default: ami-14c5486b
+
+  MyNatImageId:
+    Description: Amazon Linux AMI 2018.03.0 (HVM), SSD Volume Type
+    Type: String
+    Default: ami-01623d7b
+
+Resources:
+  Vpc1:
+    Description: Private VPC
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref Vpc1CidrBlock
+      EnableDnsSupport: True
+      Tags:
+        - Key: Name
+          Value: My CF VPC
+
+  FrontEndSubnet:
+    Description: Web Tier Subnet
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Ref MyAz
+      CidrBlock: !Select [0, !Ref Vpc1Subnets]
+      VpcId: !Ref Vpc1
+      Tags:
+        - Key: Name
+          Value: Web FrontEndSubnet
+
+  BackEndSubnet:
+    Description: Db Tier Subnet
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Ref MyAz
+      CidrBlock: !Select [1, !Ref Vpc1Subnets]
+      VpcId: !Ref Vpc1
+      Tags:
+        - Key: Name
+          Value: DataBase BackEndSubnet
+
+  InternetGateway:
+    Description: IG for Vpc1
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: IG for Vpc1
+
+  AttachInternetGatewayToVpc1:
+    Description: Attaches the Internet Gateway to Vpc1
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc1
+
+  FrontEndSubnetRouteTable:
+    Description: Route Table for Web Tier
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc1
+      Tags:
+        - Key: Name
+          Value: FrontEndSubnet RouteTable
+
+  AssociateFrondEndRouteTable:
+    Description: Associate FrondEndRouteTable to FrontEndSubnet
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref FrontEndSubnetRouteTable
+      SubnetId: !Ref FrontEndSubnet
+
+  BackEndSubnetRouteTable:
+    Description: Route Table for DataBase Tier
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc1
+      Tags:
+        - Key: Name
+          Value: BackEndSubnet RouteTable
+
+  AssociateBackEndRouteTable:
+    Description: Associate BackEndRouteTable to FrontEndSubnet
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref BackEndSubnetRouteTable
+      SubnetId: !Ref BackEndSubnet
+
+  FrontEndSubnetDefaultRoute:
+    Description: Default route out of Internet Gateway for FrontEndSubnet
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref FrontEndSubnetRouteTable
+
+  BackEndSubnetDefaultRoute:
+    Description: Default route via NAT Instance for DB Tier
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      InstanceId: !Ref NatInstance
+      RouteTableId: !Ref BackEndSubnetRouteTable
+
+  NatInstance:
+    Description: NAT Instance for DB Tier internet access
+    Type: AWS::EC2::Instance
+    Properties:
+      AvailabilityZone: !Ref MyAz
+      ImageId: !Ref MyNatImageId
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      SubnetId: !Ref FrontEndSubnet
+      SourceDestCheck: False
+      Tags:
+        - Key: Name
+          Value: My NAT Instance
+
+  FrontEndSecurityGroup:
+    Description: SG for the web Tier
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: WebSG
+      GroupDescription: SG allows HTTP/HTTPS, ICMPv4 & SSH
+      VpcId: !Ref Vpc1
+      SecurityGroupIngress:
+        - IpProtocol: TCP
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: TCP
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: TCP
+          FromPort: -1
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: ICMP
+          FromPort: 8
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: FrontEndSG
+
+  BackEndSecurityGroup:
+    Description: SG for Web Tier. Allow connectivity from Web tier only
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: DbSG
+      GroupDescription: SG allows connection from FrontEndSecurityGroup only
+      VpcId: !Ref Vpc1
+      SecurityGroupIngress:
+        - IpProtocol: TCP
+          ToPort: 3309
+          FromPort: -1
+          CidrIp: !Ref BackEndSubnet
+      Tags:
+        - Key: Name
+          Value: BackEndSG
+
+  MyElb:
+    Description: Internet facing Application LB
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+        Name: MyELB
+        Scheme: internet-facing
+        SecurityGroups: !Ref FrontEndSecurityGroup
+        Subnets:
+          - FrontEndSubnet
+        Type: application
+        Tags:
+          - Key: Name
+            Value: MyApplicationELB
+
+  MyElbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref MyElb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: Forward
+          TargetGroupArn: !Ref WebASG
+      Tags:
+        - Key: Name
+          Value: MyElbListener
+
+  WebTargetGroup:
+    Description: Target LB Group for Web tier.
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: WebTargetGroup
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref Vpc1
